@@ -3,19 +3,15 @@
 //
 //  https://github.com/floooh/pacman.c/blob/main/pacman.c
 //
+const std = @import("std");
 const assert = @import("std").debug.assert;
 const math = @import("std").math;
-const sokol = @import("sokol");
-const sg = sokol.gfx;
-const sapp = sokol.app;
-const sglue = sokol.glue;
-const saudio = sokol.audio;
-const slog = sokol.log;
-const shd = @import("shader.zig");
+const riv = @cImport({
+    @cInclude("riv.h");
+});
 
 // debugging and config options
-const AudioVolume = 0.5;
-const DbgSkipIntro = false; // set to true to skip intro gamestate
+const DbgSkipIntro = true; // set to true to skip intro gamestate
 const DbgSkipPrelude = false; // set to true to skip prelude at start of gameloop
 const DbgStartRound = 0; // set to any starting round <= 255
 const DbgShowMarkers = false; // set to true to display debug markers
@@ -51,15 +47,11 @@ const DisplayTilesX = 28; // display width/height in number of tiles
 const DisplayTilesY = 36;
 const DisplayPixelsX = DisplayTilesX * TileWidth;
 const DisplayPixelsY = DisplayTilesY * TileHeight;
-const TileTextureWidth = 256 * TileWidth;
-const TileTextureHeight = TileHeight + SpriteHeight;
 const NumSprites = 8;
-const MaxVertices = ((DisplayTilesX * DisplayTilesY) + NumSprites + NumDebugMarkers) * 6;
 
 // sound system constants
 const NumVoices = 3;
 const NumSounds = 3;
-const NumSamples = 128;
 
 // common tile codes
 const TileCodeSpace = 0x40;
@@ -270,12 +262,9 @@ const SoundDesc = struct {
 
 // a sound 'hardware voice' (of a Namco WSG emulation)
 const Voice = struct {
-    counter: u20 = 0, // a 20-bit wrap around frequency counter
     frequency: u20 = 0, // a 20-bit frequency
-    waveform: u3 = 0, // a 3-bit waveform index into wavetable ROM dump
+    waveform: u3 = 0, // a 3-bit waveform index
     volume: u4 = 0, // a 4-bit volume
-    sample_acc: f32 = 0.0,
-    sample_div: f32 = 0.0,
 };
 
 // a sound effect struct
@@ -316,7 +305,6 @@ const State = struct {
         pacman: Pacman = .{},
         ghosts: [NumGhosts]Ghost = .{.{}} ** NumGhosts,
 
-        xorshift: u32 = 0x12345678, // xorshift random-number-generator state
         score: u32 = 0,
         hiscore: u32 = 0,
         num_lives: u8 = 0,
@@ -346,12 +334,6 @@ const State = struct {
     audio: struct {
         voices: [NumVoices]Voice = .{.{}} ** NumVoices,
         sounds: [NumSounds]Sound = .{.{}} ** NumSounds,
-        voice_tick_accum: i32 = 0,
-        voice_tick_period: i32 = 0,
-        sample_duration_ns: i32 = 0,
-        sample_accum: i32 = 0,
-        num_samples: u32 = 0,
-        // sample_buffer is separate in UndefinedData
     } = .{},
 
     gfx: struct {
@@ -363,28 +345,6 @@ const State = struct {
         // 'hardware sprites' (meh, array default initialization sure looks awkward...)
         sprites: [NumSprites]Sprite = .{.{}} ** NumSprites,
         debug_markers: [NumDebugMarkers]DebugMarker = .{.{}} ** NumDebugMarkers,
-
-        // number of valid vertices in data.vertices
-        num_vertices: u32 = 0,
-
-        // sokol-gfx objects
-        pass_action: sg.PassAction = .{},
-        offscreen: struct {
-            vbuf: sg.Buffer = .{},
-            tile_img: sg.Image = .{},
-            palette_img: sg.Image = .{},
-            render_target: sg.Image = .{},
-            sampler: sg.Sampler = .{},
-            pip: sg.Pipeline = .{},
-            attachments: sg.Attachments = .{},
-            bind: sg.Bindings = .{},
-        } = .{},
-        display: struct {
-            quad_vbuf: sg.Buffer = .{},
-            sampler: sg.Sampler = .{},
-            pip: sg.Pipeline = .{},
-            bind: sg.Bindings = .{},
-        } = .{},
     } = .{},
 };
 var state: State = .{};
@@ -394,10 +354,6 @@ var state: State = .{};
 const UndefinedData = struct {
     tile_ram: [DisplayTilesY][DisplayTilesX]u8 = undefined,
     color_ram: [DisplayTilesY][DisplayTilesX]u8 = undefined,
-    vertices: [MaxVertices]Vertex = undefined,
-    tile_pixels: [TileTextureHeight][TileTextureWidth]u8 = undefined,
-    color_palette: [256]u32 = undefined,
-    sample_buffer: [NumSamples]f32 = undefined,
 };
 var data: UndefinedData = .{};
 
@@ -436,12 +392,7 @@ const LevelSpecTable = [MaxLevelSpec]LevelSpec{
 
 // a xorshift random number generator
 fn xorshift32() u32 {
-    var x = state.game.xorshift;
-    x ^= x << 13;
-    x ^= x >> 17;
-    x ^= x << 5;
-    state.game.xorshift = x;
-    return x;
+    return @as(u32, @intCast(riv.riv_rand()));
 }
 
 // return the pixel difference from a pixel position to the next tile midpoint
@@ -918,6 +869,7 @@ fn gameTick() void {
         inputDisable();
         startAfter(&state.gfx.fadeout, GameOverTicks);
         startAfter(&state.intro.started, GameOverTicks + FadeTicks);
+        riv.riv.*.quit_frame = riv.riv.*.frame + GameOverTicks;
     }
 
     if (DbgEscape) {
@@ -1576,7 +1528,6 @@ fn gameRoundInit() void {
 
     state.game.active_fruit = .None;
     state.game.freeze = FreezeReady;
-    state.game.xorshift = 0x12345678;
     state.game.num_ghosts_eaten = 0;
     gameInitTriggers();
 
@@ -1855,22 +1806,18 @@ fn introTick() void {
 
 //--- rendering system ---------------------------------------------------------
 fn gfxInit() void {
-    sg.setup(.{
-        .buffer_pool_size = 2,
-        .image_pool_size = 3,
-        .shader_pool_size = 2,
-        .pipeline_pool_size = 2,
-        .attachments_pool_size = 1,
-        .environment = sglue.environment(),
-        .logger = .{ .func = slog.func },
-    });
-    gfxDecodeTiles();
-    gfxDecodeColorPalette();
-    gfxCreateResources();
-}
-
-fn gfxShutdown() void {
-    sg.shutdown();
+    riv.riv.*.width = DisplayPixelsX;
+    riv.riv.*.height = DisplayPixelsY;
+    riv.riv.*.palette[0] = 0x000000;
+    riv.riv.*.palette[1] = 0xff0000;
+    riv.riv.*.palette[2] = 0x00ff00;
+    riv.riv.*.palette[3] = 0x0000ff;
+    _ = riv.riv_make_spritesheet(riv.riv_make_image("tiles.png", 0), TileWidth, TileHeight);
+    _ = riv.riv_make_spritesheet(riv.riv_make_image("sprites.png", 0), SpriteWidth, SpriteHeight);
+    riv.riv.*.draw.pal_enabled = true;
+    for (0..256) |i| {
+        riv.riv.*.palette[i] = ColorPalette[i];
+    }
 }
 
 fn gfxClear(tile_code: u8, color_code: u8) void {
@@ -2023,95 +1970,23 @@ fn gfxClearSprites() void {
     }
 }
 
-// adjust viewport so that aspect ratio is always correct
-fn gfxAdjustViewport(canvas_width: f32, canvas_height: f32) void {
-    assert((canvas_width > 0) and (canvas_height > 0));
-    const canvas_aspect = canvas_width / canvas_height;
-    const playfield_aspect = @as(f32, @floatFromInt(DisplayTilesX)) / DisplayTilesY;
-    const border = 10.0;
-    if (playfield_aspect < canvas_aspect) {
-        const vp_y: f32 = border;
-        const vp_h: f32 = canvas_height - 2 * border;
-        const vp_w: f32 = (canvas_height * playfield_aspect) - 2 * border;
-        const vp_x: f32 = (canvas_width - vp_w) * 0.5;
-        sg.applyViewportf(vp_x, vp_y, vp_w, vp_h, true);
-    } else {
-        const vp_x: f32 = border;
-        const vp_w: f32 = canvas_width - 2 * border;
-        const vp_h: f32 = (canvas_width / playfield_aspect) - 2 * border;
-        const vp_y: f32 = (canvas_height - vp_h) * 0.5;
-        sg.applyViewportf(vp_x, vp_y, vp_w, vp_h, true);
-    }
-}
-
 fn gfxFrame() void {
+    riv.riv_clear(0);
+
     // handle fade-in/out
     gfxUpdateFade();
 
     // render tile- and sprite-vertices and upload into vertex buffer
-    state.gfx.num_vertices = 0;
     gfxAddPlayfieldVertices();
     gfxAddSpriteVertices();
     gfxAddDebugMarkerVertices();
-    if (state.gfx.fade > 0) {
-        gfxAddFadeVertices();
-    }
-    sg.updateBuffer(state.gfx.offscreen.vbuf, .{ .ptr = &data.vertices, .size = state.gfx.num_vertices * @sizeOf(Vertex) });
-
-    // render tiles and sprites into offscreen render target
-    sg.beginPass(.{ .action = state.gfx.pass_action, .attachments = state.gfx.offscreen.attachments });
-    sg.applyPipeline(state.gfx.offscreen.pip);
-    sg.applyBindings(state.gfx.offscreen.bind);
-    sg.draw(0, state.gfx.num_vertices, 1);
-    sg.endPass();
-
-    // upscale-render the offscreen render target into the display framebuffer
-    sg.beginPass(.{ .action = state.gfx.pass_action, .swapchain = sglue.swapchain() });
-    gfxAdjustViewport(sapp.widthf(), sapp.heightf());
-    sg.applyPipeline(state.gfx.display.pip);
-    sg.applyBindings(state.gfx.display.bind);
-    sg.draw(0, 4, 1);
-    sg.endPass();
-    sg.commit();
-}
-
-fn gfxAddVertex(x: f32, y: f32, u: f32, v: f32, color_code: u32, opacity: u32) void {
-    var vtx: *Vertex = &data.vertices[state.gfx.num_vertices];
-    state.gfx.num_vertices += 1;
-    vtx.x = x;
-    vtx.y = y;
-    vtx.u = u;
-    vtx.v = v;
-    vtx.attr = (opacity << 8) | color_code;
 }
 
 fn gfxAddTileVertices(x: u32, y: u32, tile_code: u32, color_code: u32) void {
-    const dx = 1.0 / @as(f32, @floatFromInt(DisplayTilesX));
-    const dy = 1.0 / @as(f32, @floatFromInt(DisplayTilesY));
-    const dtx = @as(f32, @floatFromInt(TileWidth)) / TileTextureWidth;
-    const dty = @as(f32, @floatFromInt(TileHeight)) / TileTextureHeight;
-
-    const x0 = @as(f32, @floatFromInt(x)) * dx;
-    const x1 = x0 + dx;
-    const y0 = @as(f32, @floatFromInt(y)) * dy;
-    const y1 = y0 + dy;
-    const tx0 = @as(f32, @floatFromInt(tile_code)) * dtx;
-    const tx1 = tx0 + dtx;
-    const ty0: f32 = 0.0;
-    const ty1 = dty;
-
-    //  x0,y0
-    //  +-----+
-    //  | *   |
-    //  |   * |
-    //  +-----+
-    //          x1,y1
-    gfxAddVertex(x0, y0, tx0, ty0, color_code, 0xFF);
-    gfxAddVertex(x1, y0, tx1, ty0, color_code, 0xFF);
-    gfxAddVertex(x1, y1, tx1, ty1, color_code, 0xFF);
-    gfxAddVertex(x0, y0, tx0, ty0, color_code, 0xFF);
-    gfxAddVertex(x1, y1, tx1, ty1, color_code, 0xFF);
-    gfxAddVertex(x0, y1, tx0, ty1, color_code, 0xFF);
+    for (0..4) |i| {
+        riv.riv.*.draw.pal[i] = @as(u8, @intCast(color_code * 4 + i));
+    }
+    riv.riv_draw_sprite(tile_code, 1, x * TileWidth, y * TileWidth, 1, 1, 1, 1);
 }
 
 fn gfxUpdateFade() void {
@@ -2129,6 +2004,18 @@ fn gfxUpdateFade() void {
     if (afterOnce(state.gfx.fadeout, FadeTicks)) {
         state.gfx.fade = 255;
     }
+
+    for (0..256) |i| {
+        const origcol = ColorPalette[i];
+        var r = (origcol >> 0) & 0xff;
+        var g = (origcol >> 8) & 0xff;
+        var b = (origcol >> 16) & 0xff;
+        r = ((255 - state.gfx.fade) * r) / 255;
+        g = ((255 - state.gfx.fade) * g) / 255;
+        b = ((255 - state.gfx.fade) * b) / 255;
+        const col = (r << 0) | (g << 8) | (b << 16);
+        riv.riv.*.palette[i] = col;
+    }
 }
 
 fn gfxAddPlayfieldVertices() void {
@@ -2144,33 +2031,14 @@ fn gfxAddPlayfieldVertices() void {
 }
 
 fn gfxAddSpriteVertices() void {
-    const dx = 1.0 / @as(f32, @floatFromInt(DisplayPixelsX));
-    const dy = 1.0 / @as(f32, @floatFromInt(DisplayPixelsY));
-    const dtx = @as(f32, @floatFromInt(SpriteWidth)) / TileTextureWidth;
-    const dty = @as(f32, @floatFromInt(SpriteHeight)) / TileTextureHeight;
     for (&state.gfx.sprites) |*spr| {
         if (spr.enabled) {
-            const xx0 = @as(f32, @floatFromInt(spr.pos.x)) * dx;
-            const xx1 = xx0 + dx * SpriteWidth;
-            const yy0 = @as(f32, @floatFromInt(spr.pos.y)) * dy;
-            const yy1 = yy0 + dy * SpriteHeight;
-
-            const x0 = if (spr.flipx) xx1 else xx0;
-            const x1 = if (spr.flipx) xx0 else xx1;
-            const y0 = if (spr.flipy) yy1 else yy0;
-            const y1 = if (spr.flipy) yy0 else yy1;
-
-            const tx0 = @as(f32, @floatFromInt(spr.tile)) * dtx;
-            const tx1 = tx0 + dtx;
-            const ty0 = @as(f32, @floatFromInt(TileHeight)) / TileTextureHeight;
-            const ty1 = ty0 + dty;
-
-            gfxAddVertex(x0, y0, tx0, ty0, spr.color, 0xFF);
-            gfxAddVertex(x1, y0, tx1, ty0, spr.color, 0xFF);
-            gfxAddVertex(x1, y1, tx1, ty1, spr.color, 0xFF);
-            gfxAddVertex(x0, y0, tx0, ty0, spr.color, 0xFF);
-            gfxAddVertex(x1, y1, tx1, ty1, spr.color, 0xFF);
-            gfxAddVertex(x0, y1, tx0, ty1, spr.color, 0xFF);
+            const mx: i64 = if (spr.flipx) -1 else 1;
+            const my: i64 = if (spr.flipy) -1 else 1;
+            for (0..4) |i| {
+                riv.riv.*.draw.pal[i] = @as(u8, @intCast(spr.color * 4 + i));
+            }
+            riv.riv_draw_sprite(spr.tile, 2, spr.pos.x, spr.pos.y, 1, 1, mx, my);
         }
     }
 }
@@ -2183,310 +2051,47 @@ fn gfxAddDebugMarkerVertices() void {
     }
 }
 
-fn gfxAddFadeVertices() void {
-    // sprite tile 64 is a special opaque sprite
-    const dtx = @as(f32, @floatFromInt(SpriteWidth)) / TileTextureWidth;
-    const dty = @as(f32, @floatFromInt(SpriteHeight)) / TileTextureHeight;
-    const tx0 = 64 * dtx;
-    const tx1 = tx0 + dtx;
-    const ty0 = @as(f32, @floatFromInt(TileHeight)) / TileTextureHeight;
-    const ty1 = ty0 + dty;
-
-    const fade = state.gfx.fade;
-    gfxAddVertex(0.0, 0.0, tx0, ty0, 0, fade);
-    gfxAddVertex(1.0, 0.0, tx1, ty0, 0, fade);
-    gfxAddVertex(1.0, 1.0, tx1, ty1, 0, fade);
-    gfxAddVertex(0.0, 0.0, tx0, ty0, 0, fade);
-    gfxAddVertex(1.0, 1.0, tx1, ty1, 0, fade);
-    gfxAddVertex(0.0, 1.0, tx0, ty1, 0, fade);
-}
-
-//  8x4 tile decoder (taken from: https://github.com/floooh/chips/blob/master/systems/namco.h)
-//
-//  This decodes 2-bit-per-pixel tile data from Pacman ROM dumps into
-//  8-bit-per-pixel texture data (without doing the RGB palette lookup,
-//  this happens during rendering in the pixel shader).
-//
-//  The Pacman ROM tile layout isn't exactly strightforward, both 8x8 tiles
-//  and 16x16 sprites are built from 8x4 pixel blocks layed out linearly
-//  in memory, and to add to the confusion, since Pacman is an arcade machine
-//  with the display 90 degree rotated, all the ROM tile data is counter-rotated.
-//
-//  Tile decoding only happens once at startup from ROM dumps into a texture.
-//
-fn gfxDecodeTile8x4(
-    tile_code: u32, // the source tile code
-    src: []const u8, // encoded source tile data
-    src_stride: u32, // stride and offset in encoded tile data
-    src_offset: u32,
-    dst_x: u32, // x/y position in target texture
-    dst_y: u32,
-) void {
-    var x: u32 = 0;
-    while (x < TileWidth) : (x += 1) {
-        const ti = tile_code * src_stride + src_offset + (7 - x);
-        var y: u3 = 0;
-        while (y < (TileHeight / 2)) : (y += 1) {
-            const p_hi: u8 = (src[ti] >> (7 - y)) & 1;
-            const p_lo: u8 = (src[ti] >> (3 - y)) & 1;
-            const p: u8 = (p_hi << 1) | p_lo;
-            data.tile_pixels[dst_y + y][dst_x + x] = p;
-        }
-    }
-}
-
-// decode an 8x8 tile into the tile texture upper 8 pixels
-const TileRom = @embedFile("roms/pacman_tiles.rom");
-fn gfxDecodeTile(tile_code: u32) void {
-    const x = tile_code * TileWidth;
-    const y0 = 0;
-    const y1 = TileHeight / 2;
-    gfxDecodeTile8x4(tile_code, TileRom, 16, 8, x, y0);
-    gfxDecodeTile8x4(tile_code, TileRom, 16, 0, x, y1);
-}
-
-// decode a 16x16 sprite into the tile textures lower 16 pixels
-const SpriteRom = @embedFile("roms/pacman_sprites.rom");
-fn gfxDecodeSprite(sprite_code: u32) void {
-    const x0 = sprite_code * SpriteWidth;
-    const x1 = x0 + TileWidth;
-    const y0 = TileHeight;
-    const y1 = y0 + (TileHeight / 2);
-    const y2 = y1 + (TileHeight / 2);
-    const y3 = y2 + (TileHeight / 2);
-    gfxDecodeTile8x4(sprite_code, SpriteRom, 64, 40, x0, y0);
-    gfxDecodeTile8x4(sprite_code, SpriteRom, 64, 8, x1, y0);
-    gfxDecodeTile8x4(sprite_code, SpriteRom, 64, 48, x0, y1);
-    gfxDecodeTile8x4(sprite_code, SpriteRom, 64, 16, x1, y1);
-    gfxDecodeTile8x4(sprite_code, SpriteRom, 64, 56, x0, y2);
-    gfxDecodeTile8x4(sprite_code, SpriteRom, 64, 24, x1, y2);
-    gfxDecodeTile8x4(sprite_code, SpriteRom, 64, 32, x0, y3);
-    gfxDecodeTile8x4(sprite_code, SpriteRom, 64, 0, x1, y3);
-}
-
-// decode the Pacman tile- and sprite-ROM-dumps into an 8-bpp linear texture
-fn gfxDecodeTiles() void {
-    var tile_code: u32 = 0;
-    while (tile_code < 256) : (tile_code += 1) {
-        gfxDecodeTile(tile_code);
-    }
-    var sprite_code: u32 = 0;
-    while (sprite_code < 64) : (sprite_code += 1) {
-        gfxDecodeSprite(sprite_code);
-    }
-    // write a special 16x16 block which will be used for the fade effect
-    var y: u32 = TileHeight;
-    while (y < TileTextureHeight) : (y += 1) {
-        var x: u32 = 64 * SpriteWidth;
-        while (x < (65 * SpriteWidth)) : (x += 1) {
-            data.tile_pixels[y][x] = 1;
-        }
-    }
-}
-
-// decode the Pacman color palette into a palette texture, on the original
-// hardware, color lookup happens in two steps, first through 256-entry
-// palette which indirects into a 32-entry hardware-color palette
-// (of which only 16 entries are used on the Pacman hardware)
-//
-fn gfxDecodeColorPalette() void {
-    // Expand the 8-bit palette ROM items into RGBA8 items.
-    // The 8-bit palette item bits are packed like this:
-    //
-    // | 7| 6| 5| 4| 3| 2| 1| 0|
-    // |B1|B0|G2|G1|G0|R2|R1|R0|
-    //
-    // Intensities for the 3 bits are: 0x97 + 0x47 + 0x21
-    const color_rom = @embedFile("roms/pacman_hwcolors.rom");
-    var hw_colors: [32]u32 = undefined;
-    for (&hw_colors, 0..) |*pt, i| {
-        const rgb = color_rom[i];
-        const r: u32 = ((rgb >> 0) & 1) * 0x21 + ((rgb >> 1) & 1) * 0x47 + ((rgb >> 2) & 1) * 0x97;
-        const g: u32 = ((rgb >> 3) & 1) * 0x21 + ((rgb >> 4) & 1) * 0x47 + ((rgb >> 5) & 1) * 0x97;
-        const b: u32 = ((rgb >> 6) & 1) * 0x47 + ((rgb >> 7) & 1) * 0x97;
-        pt.* = 0xFF_00_00_00 | (b << 16) | (g << 8) | r;
-    }
-
-    // build 256-entry from indirection palette ROM
-    const palette_rom = @embedFile("roms/pacman_palette.rom");
-    for (&data.color_palette, 0..) |*pt, i| {
-        pt.* = hw_colors[palette_rom[i] & 0xF];
-        // first color in each color block is transparent
-        if ((i & 3) == 0) {
-            pt.* &= 0x00_FF_FF_FF;
-        }
-    }
-}
-
-fn gfxCreateResources() void {
-    // pass action for clearing background to black
-    state.gfx.pass_action.colors[0] = .{
-        .load_action = .CLEAR,
-        .clear_value = .{ .r = 0, .g = 0, .b = 0, .a = 1 },
-    };
-
-    // create a dynamic vertex buffer for the tile and sprite quads
-    state.gfx.offscreen.vbuf = sg.makeBuffer(.{ .usage = .STREAM, .size = @sizeOf(@TypeOf(data.vertices)) });
-
-    // create a quad-vertex-buffer for rendering the offscreen render target to the display
-    const quad_verts = [_]f32{ 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0 };
-    state.gfx.display.quad_vbuf = sg.makeBuffer(.{
-        .data = sg.asRange(&quad_verts),
-    });
-
-    // create pipeline and shader for rendering into offscreen render target
-    {
-        var pip_desc: sg.PipelineDesc = .{
-            .shader = sg.makeShader(shd.offscreenShaderDesc(sg.queryBackend())),
-            .depth = .{
-                .pixel_format = .NONE,
-            },
-        };
-        pip_desc.layout.attrs[shd.ATTR_vs_offscreen_in_pos].format = .FLOAT2;
-        pip_desc.layout.attrs[shd.ATTR_vs_offscreen_in_uv].format = .FLOAT2;
-        pip_desc.layout.attrs[shd.ATTR_vs_offscreen_in_data].format = .UBYTE4N;
-        pip_desc.colors[0].pixel_format = .RGBA8;
-        pip_desc.colors[0].blend = .{ .enabled = true, .src_factor_rgb = .SRC_ALPHA, .dst_factor_rgb = .ONE_MINUS_SRC_ALPHA };
-        state.gfx.offscreen.pip = sg.makePipeline(pip_desc);
-    }
-
-    // create pipeline and shader for rendering into display
-    {
-        var pip_desc: sg.PipelineDesc = .{
-            .shader = sg.makeShader(shd.displayShaderDesc(sg.queryBackend())),
-            .primitive_type = .TRIANGLE_STRIP,
-        };
-        pip_desc.layout.attrs[shd.ATTR_vs_display_pos].format = .FLOAT2;
-        state.gfx.display.pip = sg.makePipeline(pip_desc);
-    }
-
-    // create a render-target image with a fixed upscale ratio
-    state.gfx.offscreen.render_target = sg.makeImage(.{
-        .render_target = true,
-        .width = DisplayPixelsX * 2,
-        .height = DisplayPixelsY * 2,
-        .pixel_format = .RGBA8,
-    });
-
-    // a pass object for rendering into the offscreen render target
-    {
-        var atts_desc: sg.AttachmentsDesc = .{};
-        atts_desc.colors[0].image = state.gfx.offscreen.render_target;
-        state.gfx.offscreen.attachments = sg.makeAttachments(atts_desc);
-    }
-
-    // create the decoded tile+sprite texture
-    {
-        var img_desc: sg.ImageDesc = .{
-            .width = TileTextureWidth,
-            .height = TileTextureHeight,
-            .pixel_format = .R8,
-        };
-        img_desc.data.subimage[0][0] = sg.asRange(&data.tile_pixels);
-        state.gfx.offscreen.tile_img = sg.makeImage(img_desc);
-    }
-
-    // create the color-palette texture
-    {
-        var img_desc: sg.ImageDesc = .{
-            .width = 256,
-            .height = 1,
-            .pixel_format = .RGBA8,
-        };
-        img_desc.data.subimage[0][0] = sg.asRange(&data.color_palette);
-        state.gfx.offscreen.palette_img = sg.makeImage(img_desc);
-    }
-
-    // a nearest-filter sampler object for the offscreen render pass
-    state.gfx.offscreen.sampler = sg.makeSampler(.{
-        .min_filter = .NEAREST,
-        .mag_filter = .NEAREST,
-        .wrap_u = .CLAMP_TO_EDGE,
-        .wrap_v = .CLAMP_TO_EDGE,
-    });
-
-    // a linear-filtering sampler for the default render pass
-    state.gfx.display.sampler = sg.makeSampler(.{
-        .min_filter = .LINEAR,
-        .mag_filter = .LINEAR,
-        .wrap_u = .CLAMP_TO_EDGE,
-        .wrap_v = .CLAMP_TO_EDGE,
-    });
-
-    // setup resource binding structs
-    state.gfx.offscreen.bind.vertex_buffers[0] = state.gfx.offscreen.vbuf;
-    state.gfx.offscreen.bind.fs.images[shd.SLOT_tile_tex] = state.gfx.offscreen.tile_img;
-    state.gfx.offscreen.bind.fs.images[shd.SLOT_pal_tex] = state.gfx.offscreen.palette_img;
-    state.gfx.offscreen.bind.fs.samplers[shd.SLOT_smp] = state.gfx.offscreen.sampler;
-    state.gfx.display.bind.vertex_buffers[0] = state.gfx.display.quad_vbuf;
-    state.gfx.display.bind.fs.images[shd.SLOT_tex] = state.gfx.offscreen.render_target;
-    state.gfx.display.bind.fs.samplers[shd.SLOT_smp] = state.gfx.display.sampler;
-}
-
 //--- audio system -------------------------------------------------------------
-fn soundInit() void {
-    saudio.setup(.{ .logger = .{ .func = slog.func } });
-
-    // compute sample duration in nanoseconds
-    const samples_per_sec: i32 = saudio.sampleRate();
-    state.audio.sample_duration_ns = @divTrunc(1_000_000_000, samples_per_sec);
-
-    // compute number of 96kHz ticks per sample tick (the Namco sound
-    // generator runs at 96kHz), times 1000 for increased precision
-    state.audio.voice_tick_period = @divTrunc(96_000_000, samples_per_sec);
-}
-
-fn soundShutdown() void {
-    saudio.shutdown();
-}
-
-// update the Namco sound generator emulation, must be called at 96Khz
-const WaveTableRom = @embedFile("roms/pacman_wavetable.rom");
-fn soundVoiceTick() void {
-    for (&state.audio.voices) |*voice| {
-        voice.counter +%= voice.frequency; // NOTE: add with wraparound
-        // lookup current 4-bit sample from waveform index and
-        // topmost 5 bits of the frequency counter
-        const wave_index: u8 = (@as(u8, @intCast(voice.waveform)) << 5) | @as(u8, @intCast(voice.counter >> 15));
-        // sample is (-8..+7) * 16 -> -128 .. +127
-        const sample: i32 = (@as(i32, @intCast(WaveTableRom[wave_index] & 0xF)) - 8) * @as(i32, @intCast(voice.volume));
-        voice.sample_acc += @as(f32, @floatFromInt(sample));
-        voice.sample_div += 128.0;
-    }
-}
-
-// the per-sample tick function must be called with the playback sample rate (e.g. 44.1kHz)
-fn soundSampleTick() void {
-    var sm: f32 = 0.0;
-    for (&state.audio.voices) |*voice| {
-        if (voice.sample_div > 0.0) {
-            sm += voice.sample_acc / voice.sample_div;
-            voice.sample_acc = 0.0;
-            voice.sample_div = 0.0;
-        }
-    }
-    data.sample_buffer[state.audio.num_samples] = sm * 0.33333 * AudioVolume;
-    state.audio.num_samples += 1;
-    if (state.audio.num_samples == NumSamples) {
-        _ = saudio.push(&data.sample_buffer[0], NumSamples);
-        state.audio.num_samples = 0;
-    }
-}
-
 // the sound systems per-frame function
 fn soundFrame(frame_time_ns: i32) void {
-    // for each sample to generate...
-    state.audio.sample_accum -= frame_time_ns;
-    while (state.audio.sample_accum < 0) {
-        state.audio.sample_accum += state.audio.sample_duration_ns;
-        // tick the sound generator at 96kHz
-        state.audio.voice_tick_accum -= state.audio.voice_tick_period;
-        while (state.audio.voice_tick_accum < 0) {
-            state.audio.voice_tick_accum += 1000;
-            soundVoiceTick();
+    _ = frame_time_ns;
+    for (&state.audio.voices) |*voice| {
+        if (voice.frequency > 0) {
+            const waves = [8]c_uint{
+                riv.RIV_WAVEFORM_SINE,
+                riv.RIV_WAVEFORM_ORGAN,
+                riv.RIV_WAVEFORM_TRIANGLE,
+                riv.RIV_WAVEFORM_ORGAN,
+                riv.RIV_WAVEFORM_TILTED_SAWTOOTH,
+                riv.RIV_WAVEFORM_PULSE,
+                riv.RIV_WAVEFORM_TRIANGLE,
+                riv.RIV_WAVEFORM_SAWTOOTH,
+            };
+            const freq_mul = [8]f32{
+                0.5,
+                1.0,
+                2.0,
+                2.0,
+                1.0,
+                1.0,
+                1.0,
+                2.0,
+            };
+            var desc: riv.riv_waveform_desc = .{
+                .id = 0,
+                .type = waves[voice.waveform & 7],
+                .delay = 0,
+                .attack = 0.002,
+                .decay = 0.002,
+                .sustain = 1.0 / 60.0 - 0.006,
+                .release = 0.002,
+                .start_frequency = @as(f32, @floatFromInt(voice.frequency)) * freq_mul[voice.waveform & 7] / 8.0,
+                .end_frequency = 0,
+                .amplitude = @as(f32, @floatFromInt(voice.volume)) / 16.0,
+                .sustain_level = 0.8,
+            };
+            _ = riv.riv_waveform(&desc);
         }
-        // generate new sample into local sample buffer, and push to sokol-audio if buffer full
-        soundSampleTick();
     }
 }
 
@@ -2689,10 +2294,9 @@ fn soundFuncFrightened(slot: usize) void {
     }
 }
 
-//--- sokol-app callbacks ------------------------------------------------------
-export fn init() void {
+//--- app ------------------------------------------------------
+fn init() void {
     gfxInit();
-    soundInit();
     if (DbgSkipIntro) {
         start(&state.game.started);
     } else {
@@ -2700,10 +2304,9 @@ export fn init() void {
     }
 }
 
-export fn frame() void {
-
+fn frame() void {
     // run the game at a fixed tick rate regardless of frame rate
-    var frame_time_ns = @as(f32, @floatCast(sapp.frameDuration() * 1000000000.0));
+    var frame_time_ns = @as(f32, @floatCast((1.0 / 60.0) * 1000000000.0));
     // clamp max frame duration (so the timing isn't messed up when stepping in debugger)
     if (frame_time_ns > MaxFrameTimeNS) {
         frame_time_ns = MaxFrameTimeNS;
@@ -2735,50 +2338,42 @@ export fn frame() void {
     soundFrame(@as(i32, @intFromFloat(frame_time_ns)));
 }
 
-export fn input(ev: ?*const sapp.Event) void {
-    const event = ev.?;
-    if ((event.type == .KEY_DOWN) or (event.type == .KEY_UP)) {
-        const key_pressed = event.type == .KEY_DOWN;
-        if (state.input.enabled) {
-            state.input.anykey = key_pressed;
-            switch (event.key_code) {
-                .W,
-                .UP,
-                => state.input.up = key_pressed,
-                .S,
-                .DOWN,
-                => state.input.down = key_pressed,
-                .A,
-                .LEFT,
-                => state.input.left = key_pressed,
-                .D,
-                .RIGHT,
-                => state.input.right = key_pressed,
-                .ESCAPE => state.input.esc = key_pressed,
-                else => {},
-            }
-        }
-    } else if ((event.type == .TOUCHES_BEGAN) or (event.type == .TOUCHES_ENDED)) {
-        state.input.anykey = event.type == .TOUCHES_BEGAN;
-    }
+fn input() void {
+    state.input.up = riv.riv.*.keys[riv.RIV_GAMEPAD_UP].down;
+    state.input.down = riv.riv.*.keys[riv.RIV_GAMEPAD_DOWN].down;
+    state.input.left = riv.riv.*.keys[riv.RIV_GAMEPAD_LEFT].down;
+    state.input.right = riv.riv.*.keys[riv.RIV_GAMEPAD_RIGHT].down;
+    state.input.anykey = riv.riv.*.keys[riv.RIV_GAMEPAD_UP].press or
+        riv.riv.*.keys[riv.RIV_GAMEPAD_DOWN].press or
+        riv.riv.*.keys[riv.RIV_GAMEPAD_LEFT].press or
+        riv.riv.*.keys[riv.RIV_GAMEPAD_RIGHT].press or
+        riv.riv.*.keys[riv.RIV_GAMEPAD_A1].press;
+    state.input.esc = riv.riv.*.keys[riv.RIV_GAMEPAD_A2].press;
 }
 
-export fn cleanup() void {
-    soundShutdown();
-    gfxShutdown();
+fn save_score() !void {
+    const outcard_json = .{
+        .score = state.game.score,
+        .hiscore = state.game.hiscore,
+        .num_lives = state.game.num_lives,
+        .round = state.game.round,
+        .dots_eaten = state.game.num_dots_eaten,
+        .ghosts_eaten = state.game.num_ghosts_eaten,
+    };
+    var fba = std.heap.FixedBufferAllocator.init(&riv.riv.*.outcard);
+    var arr = std.ArrayList(u8).init(fba.allocator());
+    _ = try arr.writer().write("JSON");
+    try std.json.stringify(outcard_json, .{}, arr.writer());
+    riv.riv.*.outcard_len = @as(u32, @intCast(arr.items.len));
 }
 
 pub fn main() void {
-    sapp.run(.{
-        .init_cb = init,
-        .frame_cb = frame,
-        .event_cb = input,
-        .cleanup_cb = cleanup,
-        .width = 2 * DisplayPixelsX,
-        .height = 2 * DisplayPixelsY,
-        .window_title = "pacman.zig",
-        .logger = .{ .func = slog.func },
-    });
+    init();
+    while (riv.riv_present()) {
+        input();
+        frame();
+        save_score() catch {};
+    }
 }
 
 //-- Sound Effect Register Dumps -----------------------------------------------
@@ -3132,4 +2727,135 @@ const SoundDumpDead = [90]u32{
     0x80004800,
     0x80005000,
     0x80005800,
+};
+
+const ColorPalette = [128]u24{
+    0x000000,
+    0x000000,
+    0x000000,
+    0x000000,
+    0x000000,
+    0xdedede,
+    0xde2121,
+    0x0000ff,
+    0x000000,
+    0x000000,
+    0x000000,
+    0x000000,
+    0x000000,
+    0xdedede,
+    0xde2121,
+    0xdeb8ff,
+    0x000000,
+    0x000000,
+    0x000000,
+    0x000000,
+    0x000000,
+    0xdedede,
+    0xde2121,
+    0xdeff00,
+    0x000000,
+    0x000000,
+    0x000000,
+    0x000000,
+    0x000000,
+    0xdedede,
+    0xde2121,
+    0x47b8ff,
+    0x000000,
+    0x000000,
+    0x000000,
+    0x000000,
+    0x000000,
+    0xde2121,
+    0x0000ff,
+    0x00ffff,
+    0x000000,
+    0x000000,
+    0x000000,
+    0x000000,
+    0x000000,
+    0x000000,
+    0x000000,
+    0x000000,
+    0x000000,
+    0x000000,
+    0x000000,
+    0x000000,
+    0x000000,
+    0x000000,
+    0x000000,
+    0x000000,
+    0x000000,
+    0xdedede,
+    0x000000,
+    0x97b8ff,
+    0x000000,
+    0x0000ff,
+    0x00ff00,
+    0xdedede,
+    0x000000,
+    0x97b8ff,
+    0x000000,
+    0xde2121,
+    0x000000,
+    0x00ff00,
+    0xde2121,
+    0x97b8ff,
+    0x000000,
+    0x00ff00,
+    0xdedede,
+    0x0000ff,
+    0x000000,
+    0x000000,
+    0x000000,
+    0x000000,
+    0x000000,
+    0x0000ff,
+    0x4797de,
+    0xdedede,
+    0x000000,
+    0x47b8ff,
+    0x00ff00,
+    0x4797de,
+    0x000000,
+    0x00ffff,
+    0xdeb847,
+    0xdedede,
+    0x000000,
+    0x97b847,
+    0x00ff00,
+    0xdedede,
+    0x000000,
+    0xdeff00,
+    0xdeb8ff,
+    0x00ffff,
+    0x000000,
+    0xdedede,
+    0xde2121,
+    0x000000,
+    0x000000,
+    0x97b8ff,
+    0x000000,
+    0xde2121,
+    0x000000,
+    0x97b8ff,
+    0x000000,
+    0xde2121,
+    0x000000,
+    0x000000,
+    0x000000,
+    0x000000,
+    0x000000,
+    0xdedede,
+    0x97b8ff,
+    0x0000ff,
+    0x000000,
+    0xdedede,
+    0xde2121,
+    0x97b8ff,
+    0x000000,
+    0x97b8ff,
+    0x000000,
+    0xdedede,
 };

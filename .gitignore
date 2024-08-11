@@ -1,4 +1,3 @@
-.vscode/
-zig-*/
-.zig-*/
-emsdk/
+*.o
+*.elf
+*.sqfs
