@@ -1,0 +1,13 @@
+{
+    "name": "Pakboy",
+    "summary": "PacMan demake for RIVES",
+    "description": "The objective of the game is to eat all of the dots placed in the maze while avoiding four colored ghosts. Use arrows to play.",
+    "tags": ["maze", "2d", "demake", "arcade"],
+    "authors": [{
+        "name": "Eduardo Bart",
+        "link": "https://github.com/edubart"
+    }],
+    "links": [
+        "https://github.com/edubart/pakboy"
+    ]
+}

@@ -1,8 +1,3 @@
-//
-//  See comment header here for some implementation details:
-//
-//  https://github.com/floooh/pacman.c/blob/main/pacman.c
-//
 const std = @import("std");
 const assert = @import("std").debug.assert;
 const math = @import("std").math;
@@ -260,7 +255,7 @@ const SoundDesc = struct {
     voice: [NumVoices]bool = .{false} ** NumVoices,
 };
 
-// a sound 'hardware voice' (of a Namco WSG emulation)
+// a sound 'hardware voice'
 const Voice = struct {
     frequency: u20 = 0, // a 20-bit frequency
     waveform: u3 = 0, // a 3-bit waveform index
@@ -1390,11 +1385,11 @@ fn gameInit() void {
     state.game.num_dots_eaten = 0;
     state.game.score = 0;
 
-    // draw the playfield and PLAYER ONE READY! message
+    // draw the playfield
     gfxClear(TileCodeSpace, ColorCodeDot);
-    gfxColorText(.{ .x = 9, .y = 0 }, ColorCodeDefault, "HIGH SCORE");
+    // gfxColorText(.{ .x = 9, .y = 0 }, ColorCodeDefault, "HIGH SCORE");
     gameInitPlayfield();
-    gfxColorText(.{ .x = 9, .y = 14 }, 5, "PLAYER ONE");
+    gfxColorText(.{ .x = 11, .y = 14 }, 5, "PAKBOY");
     gfxColorText(.{ .x = 11, .y = 20 }, 9, "READY!");
 }
 
@@ -1582,10 +1577,10 @@ fn gameRoundInit() void {
 // update dynamic background tiles
 fn gameUpdateTiles() void {
     // print score and hiscore
-    gfxColorScore(.{ .x = 6, .y = 1 }, ColorCodeDefault, state.game.score);
-    if (state.game.hiscore > 0) {
-        gfxColorScore(.{ .x = 16, .y = 1 }, ColorCodeDefault, state.game.hiscore);
-    }
+    // gfxColorScore(.{ .x = 6, .y = 1 }, ColorCodeDefault, state.game.score);
+    // if (state.game.hiscore > 0) {
+    //     gfxColorScore(.{ .x = 16, .y = 1 }, ColorCodeDefault, state.game.hiscore);
+    // }
 
     // update the energizer pill state (blinking/non-blinking)
     const pill_pos = [NumPills]ivec2{
@@ -1807,7 +1802,8 @@ fn introTick() void {
 //--- rendering system ---------------------------------------------------------
 fn gfxInit() void {
     riv.riv.*.width = DisplayPixelsX;
-    riv.riv.*.height = DisplayPixelsY;
+    riv.riv.*.height = DisplayPixelsY - 24;
+    riv.riv.*.draw.origin.y = -24;
     riv.riv.*.palette[0] = 0x000000;
     riv.riv.*.palette[1] = 0xff0000;
     riv.riv.*.palette[2] = 0x00ff00;
@@ -1858,7 +1854,7 @@ fn gfxColorTile(pos: ivec2, color_code: u8, tile_code: u8) void {
     gfxColor(pos, color_code);
 }
 
-fn gfxToNamcoChar(c: u8) u8 {
+fn gfxToChar(c: u8) u8 {
     return switch (c) {
         ' ' => 64,
         '/' => 58,
@@ -1870,7 +1866,7 @@ fn gfxToNamcoChar(c: u8) u8 {
 }
 
 fn gfxChar(pos: ivec2, chr: u8) void {
-    gfxTile(pos, gfxToNamcoChar(chr));
+    gfxTile(pos, gfxToChar(chr));
 }
 
 fn gfxColorChar(pos: ivec2, color_code: u8, chr: u8) void {
@@ -2010,9 +2006,10 @@ fn gfxUpdateFade() void {
         var r = (origcol >> 0) & 0xff;
         var g = (origcol >> 8) & 0xff;
         var b = (origcol >> 16) & 0xff;
-        r = ((255 - state.gfx.fade) * r) / 255;
-        g = ((255 - state.gfx.fade) * g) / 255;
-        b = ((255 - state.gfx.fade) * b) / 255;
+        const o = 0xff - state.gfx.fade;
+        r = (o * r) / 0xff;
+        g = (o * g) / 0xff;
+        b = (o * b) / 0xff;
         const col = (r << 0) | (g << 8) | (b << 16);
         riv.riv.*.palette[i] = col;
     }
@@ -2735,41 +2732,41 @@ const ColorPalette = [128]u24{
     0x000000,
     0x000000,
     0x000000,
-    0xdedede,
-    0xde2121,
-    0x0000ff,
+    0xffffff,
+    0xff3366,
+    0x3333ff,
     0x000000,
     0x000000,
     0x000000,
     0x000000,
     0x000000,
-    0xdedede,
-    0xde2121,
-    0xdeb8ff,
+    0xffffff,
+    0xff3366,
+    0xffb8ff,
     0x000000,
     0x000000,
     0x000000,
     0x000000,
     0x000000,
-    0xdedede,
-    0xde2121,
-    0xdeff00,
+    0xffffff,
+    0xff3366,
+    0xff9933,
     0x000000,
     0x000000,
     0x000000,
     0x000000,
     0x000000,
-    0xdedede,
-    0xde2121,
+    0xffffff,
+    0xff3366,
     0x47b8ff,
     0x000000,
     0x000000,
     0x000000,
     0x000000,
     0x000000,
-    0xde2121,
-    0x0000ff,
-    0x00ffff,
+    0xff3366,
+    0x3333ff,
+    0x33ffff,
     0x000000,
     0x000000,
     0x000000,
@@ -2787,75 +2784,75 @@ const ColorPalette = [128]u24{
     0x000000,
     0x000000,
     0x000000,
-    0xdedede,
-    0x000000,
-    0x97b8ff,
-    0x000000,
-    0x0000ff,
-    0x00ff00,
-    0xdedede,
+    0xffffff,
     0x000000,
     0x97b8ff,
     0x000000,
-    0xde2121,
+    0x3333ff,
+    0x33ff33,
+    0xffffff,
     0x000000,
-    0x00ff00,
-    0xde2121,
     0x97b8ff,
     0x000000,
-    0x00ff00,
-    0xdedede,
-    0x0000ff,
+    0xff3366,
+    0x000000,
+    0x33ff33,
+    0xff3366,
+    0x97b8ff,
+    0x000000,
+    0x33ff33,
+    0xffffff,
+    0x3333ff,
     0x000000,
     0x000000,
     0x000000,
     0x000000,
     0x000000,
-    0x0000ff,
-    0x4797de,
-    0xdedede,
+    0x3333ff,
+    0x4797ff,
+    0xffffff,
     0x000000,
     0x47b8ff,
-    0x00ff00,
-    0x4797de,
+    0x33ff33,
+    0x4797ff,
     0x000000,
-    0x00ffff,
-    0xdeb847,
-    0xdedede,
+    0x33ffff,
+    0xffb847,
+    0xffffff,
     0x000000,
     0x97b847,
-    0x00ff00,
-    0xdedede,
+    0x33ff33,
+    0xffffff,
     0x000000,
-    0xdeff00,
-    0xdeb8ff,
-    0x00ffff,
+    0xff9933,
+    0xffb8ff,
+    0x33ffff,
     0x000000,
-    0xdedede,
-    0xde2121,
+    0xffffff,
+    0xff3366,
     0x000000,
     0x000000,
     0x97b8ff,
     0x000000,
-    0xde2121,
+    0xff3366,
     0x000000,
     0x97b8ff,
     0x000000,
-    0xde2121,
+    0xff3366,
     0x000000,
     0x000000,
     0x000000,
     0x000000,
     0x000000,
-    0xdedede,
+    0xffffff,
     0x97b8ff,
-    0x0000ff,
+    0x3333ff,
     0x000000,
-    0xdedede,
-    0xde2121,
-    0x97b8ff,
-    0x000000,
+    0xffffff,
+    0xff3366,
     0x97b8ff,
     0x000000,
-    0xdedede,
+    0x97b8ff,
+    0x000000,
+    0xffffff,
 };

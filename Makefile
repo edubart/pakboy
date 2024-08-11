@@ -1,18 +1,11 @@
-SOURCES=pacman.zig
-EXE=pacman.elf
-NAME=pacman
-DATA_FILES=tiles.png sprites.png
-RIVEMU_RUN=rivemu
+SOURCES=pakboy.zig
+EXE=pakboy.elf
+NAME=pakboy
+DATA_FILES=tiles.png sprites.png info.json
 RIVEMU_EXEC=rivemu -quiet -no-window -sdk -workspace -exec
-ifneq (,$(wildcard /usr/sbin/riv-run))
-	RIVEMU_RUN=riv-run
-	RIVEMU_EXEC=
-endif
+ZIG_FLAGS= -fsingle-threaded -fstrip -target riscv64-linux-musl -O ReleaseSmall -I. libriv.so -lc -dynamic
 
 build: $(NAME).sqfs
-
-run: $(NAME).sqfs
-	$(RIVEMU_RUN) $<
 
 clean:
 	rm -f *.sqfs *.elf *.o libriv.so riv.h
@@ -22,8 +15,6 @@ $(NAME).sqfs: $(EXE) $(DATA_FILES)
 
 $(EXE): $(SOURCES)
 	$(RIVEMU_EXEC) cp /usr/include/riv.h /usr/lib/libriv.so .
-	zig build-exe $^ -femit-bin=$@ -fsingle-threaded -fstrip \
-		-target riscv64-linux-musl \
-		-O ReleaseSmall -I. libriv.so -lc -dynamic
+	zig build-exe $^ -femit-bin=$@ $(ZIG_FLAGS)
 	$(RIVEMU_EXEC) riv-strip $@
 	rm -f libriv.so riv.h
