@@ -1,7 +1,7 @@
 SOURCES=pakboy.zig
 EXE=pakboy.elf
 NAME=pakboy
-DATA_FILES=tiles.png sprites.png info.json
+DATA_FILES=tiles.png sprites.png info.json cover.png
 RIVEMU_EXEC=rivemu -quiet -no-window -sdk -workspace -exec
 ZIG_FLAGS= -fsingle-threaded -fstrip -target riscv64-linux-musl -O ReleaseSmall -I. libriv.so -lc -dynamic
 
